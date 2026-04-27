@@ -189,7 +189,7 @@ process {
             $languagePack | Remove-Item -Force
         }
 
-        if (($os -ne "server_2016") -or ($os -ne "server_2019")) {
+        if (($os -ne "server_2016") -and ($os -ne "server_2019")) {
             $capabilities = @(
                 "Microsoft-Windows-LanguageFeatures-Basic-$($lang.toLower())-Package~31bf3856ad364e35~amd64~~.cab",
                 "Microsoft-Windows-LanguageFeatures-Handwriting-$($lang.toLower())-Package~31bf3856ad364e35~amd64~~.cab",
@@ -198,48 +198,154 @@ process {
                 "Microsoft-Windows-LanguageFeatures-TextToSpeech-$($lang.toLower())-Package~31bf3856ad364e35~amd64~~.cab"
             )
 
-            foreach ($capability in $capabilities) {
+            $capabilityMap = @(
+                [PSCustomObject]@{ Cab = $capabilities[0]; Name = "Language.Basic~~~$($lang.toLower())~0.0.1.0" },
+                [PSCustomObject]@{ Cab = $capabilities[1]; Name = "Language.Handwriting~~~$($lang.toLower())~0.0.1.0" },
+                [PSCustomObject]@{ Cab = $capabilities[2]; Name = "Language.OCR~~~$($lang.toLower())~0.0.1.0" },
+                [PSCustomObject]@{ Cab = $capabilities[3]; Name = "Language.Speech~~~$($lang.toLower())~0.0.1.0" },
+                [PSCustomObject]@{ Cab = $capabilities[4]; Name = "Language.TextToSpeech~~~$($lang.toLower())~0.0.1.0" }
+            )
 
-                if ((Get-WindowsCapability -Online | Where-Object { $_.Name -match "$lang" -and $_.Name -match $capability.Split("-")[3] }).State -ne "Installed") {
+            $installedCapabilities = Get-WindowsCapability -Online
+            $capabilitiesToInstallFromCab = @()
 
-                    $capabilityUri = "$blobRoot/$capability"
+            foreach ($capabilityItem in $capabilityMap) {
+                $capabilityState = ($installedCapabilities | Where-Object { $_.Name -eq $capabilityItem.Name } | Select-Object -First 1).State
 
-                    # Download Windows Capability
+                if ($capabilityState -eq "Installed") {
+                    continue
+                }
+
+                # First attempt OS-managed installation from configured Windows capability sources.
+                try {
+                    Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installing $($capabilityItem.Name) using Add-WindowsCapability" -Severity Information -LogPath $logPath
+                    Add-WindowsCapability -Online -Name $capabilityItem.Name -NoRestart -ErrorAction Stop | Out-Null
+                    Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installed $($capabilityItem.Name) using Add-WindowsCapability" -Severity Information -LogPath $logPath
+                    $restartPostInstall = $true
+                }
+                catch {
+                    $errorMessage = $_.Exception.Message
+                    Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Add-WindowsCapability failed for $($capabilityItem.Name). Falling back to CAB install. Error: $errorMessage" -Severity Warning -LogPath $logPath
+
+                    $capabilityUri = "$blobRoot/$($capabilityItem.Cab)"
+                    $destinationPath = "$env:SYSTEMROOT\Temp\$(Split-Path $capabilityUri -Leaf)"
+                    $capabilitiesToInstallFromCab += [PSCustomObject]@{
+                        CapabilityName = $capabilityItem.Name
+                        Cab            = $capabilityItem.Cab
+                        Uri            = $capabilityUri
+                        Destination    = $destinationPath
+                    }
+                }
+            }
+
+            if ($capabilitiesToInstallFromCab.Count -gt 0) {
+                # Download fallback CAB files in parallel, then install serially to avoid CBS servicing lock contention.
+                $downloadJobs = foreach ($capabilityItem in $capabilitiesToInstallFromCab) {
+                    Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Queue download $($capabilityItem.Cab)" -Severity Information -LogPath $logPath
+                    [PSCustomObject]@{
+                        Cab         = $capabilityItem.Cab
+                        Destination = $capabilityItem.Destination
+                        Job         = Start-Job -ScriptBlock {
+                            param (
+                                [string] $cabName,
+                                [string] $source,
+                                [string] $destination
+                            )
+
+                            try {
+                                Start-BitsTransfer -Source $source -Destination $destination -ErrorAction Stop
+                                [PSCustomObject]@{
+                                    Cab         = $cabName
+                                    Destination = $destination
+                                    Success     = $true
+                                    Error       = $null
+                                }
+                            }
+                            catch {
+                                [PSCustomObject]@{
+                                    Cab         = $cabName
+                                    Destination = $destination
+                                    Success     = $false
+                                    Error       = $_.Exception.Message
+                                }
+                            }
+                        } -ArgumentList $capabilityItem.Cab, $capabilityItem.Uri, $capabilityItem.Destination
+                    }
+                }
+
+                Wait-Job -Job ($downloadJobs.Job) | Out-Null
+                $downloadResults = @()
+
+                foreach ($downloadJob in $downloadJobs) {
                     try {
-                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Downloading $capability" -Severity Information -LogPath $logPath
-                        Start-BitsTransfer -Source $capabilityUri -Destination "$env:SYSTEMROOT\Temp\$(Split-Path $capabilityUri -Leaf)"
-                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Downloaded $capability" -Severity Information -LogPath $logPath
-                        $file = Get-Item -Path "$env:SYSTEMROOT\Temp\$(Split-Path $capabilityUri -Leaf)"
+                        $result = Receive-Job -Job $downloadJob.Job -ErrorAction Stop
+                        if ($null -eq $result) {
+                            $result = [PSCustomObject]@{
+                                Cab         = $downloadJob.Cab
+                                Destination = $downloadJob.Destination
+                                Success     = $false
+                                Error       = "No download result was returned by the background job."
+                            }
+                        }
+                        $downloadResults += $result
+                    }
+                    catch {
+                        $downloadResults += [PSCustomObject]@{
+                            Cab         = $downloadJob.Cab
+                            Destination = $downloadJob.Destination
+                            Success     = $false
+                            Error       = $_.Exception.Message
+                        }
+                    }
+                    finally {
+                        Remove-Job -Job $downloadJob.Job -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
+                foreach ($capabilityItem in $capabilitiesToInstallFromCab) {
+                    $downloadResult = $downloadResults | Where-Object { $_.Cab -eq $capabilityItem.Cab } | Select-Object -First 1
+
+                    if (($null -eq $downloadResult) -or (-not $downloadResult.Success)) {
+                        $downloadError = if ($null -ne $downloadResult) { $downloadResult.Error } else { "Unknown download failure." }
+                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Failed to download $($capabilityItem.Cab): $downloadError" -Severity Error -LogPath $logPath
+                        continue
+                    }
+
+                    try {
+                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Downloaded $($capabilityItem.Cab)" -Severity Information -LogPath $logPath
+                        $file = Get-Item -Path $downloadResult.Destination -ErrorAction Stop
                         Unblock-File -Path $file.FullName -ErrorAction SilentlyContinue
                     }
                     catch {
                         $errorMessage = $_.Exception.Message
                         if ($Null -eq $errorMessage) {
-                            Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Failed to Download Language Pack: $_" -Severity Error -LogPath $logPath
+                            Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Failed to prepare $($capabilityItem.Cab): $_" -Severity Error -LogPath $logPath
                         }
                         else {
                             Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): $errorMessage" -Severity Error -LogPath $logPath
                         }
+                        continue
                     }
 
-                    # Install Windows Capability
+                    # Install Windows Capability from fallback CAB.
                     try {
+                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installing $($capabilityItem.Cab) using Add-WindowsPackage" -Severity Information -LogPath $logPath
                         Add-WindowsPackage -Online -PackagePath $file.FullName -NoRestart
-                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installed $capability" -Severity Information -LogPath $logPath
+                        Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installed $($capabilityItem.Cab) using Add-WindowsPackage" -Severity Information -LogPath $logPath
                         $restartPostInstall = $true
                     }
                     catch {
                         $errorMessage = $_.Exception.Message
                         if ($Null -eq $errorMessage) {
-                            Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Failed to install $capability" -Severity Error -LogPath $logPath
+                            Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Failed to install $($capabilityItem.Cab)" -Severity Error -LogPath $logPath
                         }
                         else {
                             Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): $errorMessage" -Severity Error -LogPath $logPath
                         }
                     }
 
-                    # Remove Windows Capability file
-                    $file | Remove-Item -Force
+                    # Remove fallback CAB file.
+                    $file | Remove-Item -Force -ErrorAction SilentlyContinue
                 }
             }
         }
