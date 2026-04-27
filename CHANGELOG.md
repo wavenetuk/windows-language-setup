@@ -1,3 +1,9 @@
+## v0.3.4 (2026-04-27)
+
+### Fix
+
+- add validation pattern for primary and secondary language parameters in setup scripts (#11)
+
 ## v0.3.3 (2025-04-08)
 
 ### Fix
