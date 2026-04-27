@@ -1,3 +1,9 @@
+## v0.3.5 (2026-04-27)
+
+### Fix
+
+- remove NoRestart flag from Add-WindowsCapability command in language setup script (#12)
+
 ## v0.3.4 (2026-04-27)
 
 ### Fix
