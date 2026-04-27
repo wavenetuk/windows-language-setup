@@ -219,7 +219,7 @@ process {
                 # First attempt OS-managed installation from configured Windows capability sources.
                 try {
                     Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installing $($capabilityItem.Name) using Add-WindowsCapability" -Severity Information -LogPath $logPath
-                    Add-WindowsCapability -Online -Name $capabilityItem.Name -NoRestart -ErrorAction Stop | Out-Null
+                    Add-WindowsCapability -Online -Name $capabilityItem.Name -ErrorAction Stop | Out-Null
                     Write-Log -Object "LanguageSetup_Part1" -Message "$($lang): Installed $($capabilityItem.Name) using Add-WindowsCapability" -Severity Information -LogPath $logPath
                     $restartPostInstall = $true
                 }
