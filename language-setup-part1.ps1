@@ -21,7 +21,7 @@ Param (
 
     [Parameter(Mandatory = $false, HelpMessage = 'Restart the virtual machine')]
     [ValidateSet('true', 'false')]
-    [string] $restart = 'true'
+    [string] $restart = 'false'
 )
 
 begin {
