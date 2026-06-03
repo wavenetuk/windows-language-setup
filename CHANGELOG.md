@@ -1,3 +1,9 @@
+## v0.3.6 (2026-06-03)
+
+### Fix
+
+- improve OS detection logic and error handling in language setup script (#14)
+
 ## v0.3.5 (2026-04-27)
 
 ### Fix
