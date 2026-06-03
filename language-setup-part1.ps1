@@ -119,17 +119,23 @@ begin {
 
     # Get OS Name
     $osName = (Get-ComputerInfo).OsName
-    $os = if ($osName -match "Server \d+") {
-        $matches[0].Replace(" ", "_").tolower()
-        $type = "Server"
+    $type = $null
+    $os = $null
+
+    if ($osName -match 'Server\s+\d+') {
+        $os = $matches[0].Replace(' ', '_').ToLower()
+        $type = 'Server'
     }
-    elseif ($osName -match "Windows \d+") {
-        $matches[0].Replace(" ", "_").tolower()
-        $type = "Client"
+    elseif ($osName -match 'Windows\s+\d+') {
+        $os = $matches[0].Replace(' ', '_').ToLower()
+        $type = 'Client'
     }
     else {
-        $osName
+        throw "Unable to determine OS type from OsName: $osName"
     }
+
+    Write-Log -Object "LanguageSetup_Part1" -Message "Detected OsName=[$osName], os=[$os], type=[$type]" -Severity Information -LogPath $logPath
+
     $storageAccount = "https://$storageAccountName.blob.core.windows.net"
     $blobRoot = "$storageAccount/media/windows/language_packs/$os"
 
